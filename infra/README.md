@@ -8,7 +8,7 @@ Outputs and `Fn::ImportValue`. Deploy them in the order below.
 
 | Order | File            | Stack (suggested name)         | Purpose |
 |-------|-----------------|--------------------------------|---------|
-| 1     | `network.yaml`  | `programming-course-network`   | VPC (2 public + 2 private subnets across 2 AZs), IGW, NAT gateway, route tables, internet-facing ALB, ALB security group, HTTP:80 listener (optional HTTPS:443), IP target group with health check `/health` on port `8000`. |
+| 1     | `network.yaml`  | `programming-course-network`   | VPC (2 public + 2 private subnets across 2 AZs), IGW, NAT gateway, route tables, internet-facing ALB whose security group allows ingress only from the CloudFront origin-facing prefix list, HTTP:80 listener (optional HTTPS:443) that forwards only requests carrying the shared `X-Origin-Verify` header, IP target group with health check `/health` on port `8000`. |
 | 2     | `security.yaml` | `programming-course-security`  | REGIONAL WAFv2 WebACL (common rule set + known bad inputs + rate-based rule) associated with the ALB. |
 | 3     | `auth.yaml`     | `programming-course-auth`      | Cognito User Pool, Google identity provider (only IdP), Managed Login v2 domain + branding, public SPA app client (OAuth code flow, PKCE, no secret). |
 | 4     | `storage.yaml`  | `programming-course-storage`   | Private S3 content bucket `course-content-<suffix>`, private SPA hosting bucket, CloudFront distribution (SPA default behavior + `/api/*` -> ALB with caching disabled). |
@@ -19,6 +19,9 @@ Outputs and `Fn::ImportValue`. Deploy them in the order below.
 - `security` and `auth` only depend on being able to import the ALB ARN
   (`security`) or nothing cross-stack (`auth`), so both can follow `network`.
 - `storage` imports the ALB DNS name from `network` (for the `/api/*` origin).
+  Pass the same `OriginVerifySecret` to both `network` and `storage` so
+  CloudFront sends the header the ALB requires; see DEPLOY.md "Front-door
+  hardening".
 - `compute` imports from `network` (VPC, subnets, ALB SG, target group),
   `storage` (content bucket name + ARN), and `auth` (user pool id, client id,
   issuer URL). Deploy it last.
@@ -38,13 +41,15 @@ Outputs and `Fn::ImportValue`. Deploy them in the order below.
 | `ContainerPort` | no | `8000` | Must match `compute.yaml`. |
 | `HealthCheckPath` | no | `/health` | Backend health endpoint. |
 | `CertificateArn` | no | `''` | Optional ACM cert (us-east-1) to add an HTTPS:443 listener. |
+| `CloudFrontPrefixListId` | no | `pl-3b927c52` | AWS-managed prefix list `com.amazonaws.global.cloudfront.origin-facing`; the ALB SG allows ingress only from this (not `0.0.0.0/0`). `pl-3b927c52` is the us-east-1 id; confirm with `aws ec2 describe-managed-prefix-lists`. |
+| `OriginVerifySecret` | recommended | `''` (NoEcho) | Shared secret CloudFront sends in `X-Origin-Verify`; when set the ALB serves only requests carrying it (else `403`). Use the same value in `storage.yaml`. |
 
 ### security.yaml
 | Parameter | Required | Default | Notes |
 |-----------|----------|---------|-------|
 | `ProjectName` | no | `programming-course` | |
 | `NetworkStackName` | yes* | `programming-course-network` | Name of the deployed network stack (import source). |
-| `RateLimit` | no | `2000` | Requests per 5-minute window per IP. |
+| `RateLimit` | no | `2000` | Requests per 5-minute window, keyed on the real client IP via `X-Forwarded-For` (`AggregateKeyType: FORWARDED_IP`), because traffic arrives through CloudFront. |
 
 ### auth.yaml
 | Parameter | Required | Default | Notes |
@@ -63,6 +68,8 @@ Outputs and `Fn::ImportValue`. Deploy them in the order below.
 | `PriceClass` | no | `PriceClass_100` | CloudFront price class. |
 | `CertificateArn` | no | `''` | Optional ACM cert (us-east-1) for a custom CloudFront domain. |
 | `DomainName` | no | `''` | Optional custom domain (requires `CertificateArn`). |
+| `BackendCertificateArn` | no | `''` | Optional ACM cert on the ALB HTTPS:443 listener (same as network `CertificateArn`). When set, the `/api/*` origin uses `https-only` so Bearer tokens are encrypted on the CloudFront-to-ALB hop; empty uses HTTP:80 (see DEPLOY.md residual-risk note). |
+| `OriginVerifySecret` | recommended | `''` (NoEcho) | Must match the network stack value; sent as the `X-Origin-Verify` origin header on `/api/*`. |
 
 ### compute.yaml
 | Parameter | Required | Default | Notes |
@@ -122,11 +129,15 @@ stacks import them by passing the upstream stack name as a parameter
 ```sh
 REGION=us-east-1
 
+# 0. Shared origin-verify secret (reused by network + storage)
+ORIGIN_SECRET=$(openssl rand -hex 32)
+
 # 1. Network
 aws cloudformation deploy --region $REGION \
   --stack-name programming-course-network \
   --template-file network.yaml \
-  --capabilities CAPABILITY_NAMED_IAM
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides OriginVerifySecret=$ORIGIN_SECRET
 
 # 2. Security (WAF)
 aws cloudformation deploy --region $REGION \
@@ -138,7 +149,9 @@ aws cloudformation deploy --region $REGION \
 aws cloudformation deploy --region $REGION \
   --stack-name programming-course-storage \
   --template-file storage.yaml \
-  --parameter-overrides NetworkStackName=programming-course-network
+  --parameter-overrides \
+    NetworkStackName=programming-course-network \
+    OriginVerifySecret=$ORIGIN_SECRET
 
 APP_URL=$(aws cloudformation describe-stacks --region $REGION \
   --stack-name programming-course-storage \

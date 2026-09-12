@@ -23,9 +23,29 @@ Parameters:
     Description: >-
       Optional ACM certificate ARN (us-east-1). If provided, an HTTPS:443
       listener is added to the ALB in addition to HTTP:80.
+  CloudFrontPrefixListId:
+    Type: String
+    Default: pl-3b927c52
+    Description: >-
+      AWS-managed prefix list id for com.amazonaws.global.cloudfront.origin-facing.
+      In us-east-1 this is pl-3b927c52. Only CloudFront origin-facing edge ranges
+      in this prefix list are allowed to reach the ALB, so the ALB is not a second
+      open front door. Confirm the current id with:
+      aws ec2 describe-managed-prefix-lists --filters
+      Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+  OriginVerifySecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Shared secret sent by CloudFront in the X-Origin-Verify header. When set,
+      the ALB only forwards requests carrying this header value and returns 403
+      to anything else, so requests must transit CloudFront. Must match the
+      value configured on the CloudFront /api/* origin in the storage stack.
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  HasOriginVerifySecret: !Not [!Equals [!Ref OriginVerifySecret, '']]
 
 Mappings:
   Subnets:
@@ -190,15 +210,15 @@ Resources:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: HTTP from the internet
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: HTTP from CloudFront origin-facing edge ranges only
         - !If
           - HasCertificate
           - IpProtocol: tcp
             FromPort: 443
             ToPort: 443
-            CidrIp: 0.0.0.0/0
-            Description: HTTPS from the internet
+            SourcePrefixListId: !Ref CloudFrontPrefixListId
+            Description: HTTPS from CloudFront origin-facing edge ranges only
           - !Ref AWS::NoValue
       Tags:
         - Key: Name
@@ -245,13 +265,39 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-tg'
 
+  # When an origin-verify secret is configured, the listener default action
+  # rejects any request that does not carry the shared header (i.e. did not
+  # transit CloudFront). A higher-priority rule forwards verified requests.
+  # With no secret configured the listener forwards everything (dev/default).
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Protocol: HTTP
       Port: 80
-      DefaultActions:
+      DefaultActions: !If
+        - HasOriginVerifySecret
+        - - Type: fixed-response
+            FixedResponseConfig:
+              StatusCode: '403'
+              ContentType: text/plain
+              MessageBody: Direct access is not allowed. Requests must transit CloudFront.
+        - - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  HttpOriginVerifyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasOriginVerifySecret
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Verify
+            Values:
+              - !Ref OriginVerifySecret
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
@@ -264,7 +310,29 @@ Resources:
       Port: 443
       Certificates:
         - CertificateArn: !Ref CertificateArn
-      DefaultActions:
+      DefaultActions: !If
+        - HasOriginVerifySecret
+        - - Type: fixed-response
+            FixedResponseConfig:
+              StatusCode: '403'
+              ContentType: text/plain
+              MessageBody: Direct access is not allowed. Requests must transit CloudFront.
+        - - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  HttpsOriginVerifyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Verify
+            Values:
+              - !If [HasOriginVerifySecret, !Ref OriginVerifySecret, 'disabled']
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 

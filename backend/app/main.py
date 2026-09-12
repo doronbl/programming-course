@@ -32,7 +32,15 @@ api = APIRouter(prefix="/api")
 
 @api.get("/hello", tags=["hello"])
 def hello(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, str]:
-    """Protected endpoint. Requires a valid Cognito-issued JWT."""
+    """Protected endpoint. Requires a valid Cognito-issued JWT.
+
+    Token choice: ``/hello`` only needs to confirm a valid session, so it
+    accepts either the access or id token (see ``auth._verify_client``). The
+    SPA sends the access token here. Endpoints that key on user identity
+    (email/name in the id token) should document and enforce the id token
+    specifically; decide per endpoint rather than relying on whichever token
+    the caller happens to send.
+    """
     return {"message": "Hello World"}
 
 

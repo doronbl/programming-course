@@ -34,11 +34,29 @@ Parameters:
     Description: >-
       Optional custom domain (CNAME) for the CloudFront distribution. Requires
       CertificateArn to be set.
+  BackendCertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional ACM certificate ARN for the ALB HTTPS:443 listener (matches the
+      network stack CertificateArn). When set, the CloudFront /api/* origin
+      connects to the ALB over HTTPS only, so Bearer tokens are encrypted on the
+      CloudFront-to-ALB hop. Left empty (default) the origin uses HTTP:80.
+  OriginVerifySecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Shared secret sent to the ALB in the X-Origin-Verify origin custom header
+      on the /api/* behavior. Must match the network stack OriginVerifySecret so
+      the ALB forwards only CloudFront-originated requests.
 
 Conditions:
   HasCustomDomain: !And
     - !Not [!Equals [!Ref CertificateArn, '']]
     - !Not [!Equals [!Ref DomainName, '']]
+  ApiOriginHttps: !Not [!Equals [!Ref BackendCertificateArn, '']]
+  HasOriginVerifySecret: !Not [!Equals [!Ref OriginVerifySecret, '']]
 
 Resources:
   # Managed CloudFront policy ids (global, well-known):
@@ -129,12 +147,22 @@ Resources:
           - Id: alb-api-origin
             DomainName:
               Fn::ImportValue: !Sub '${NetworkStackName}-AlbDnsName'
+            # When a backend certificate is configured the origin connects over
+            # HTTPS only, encrypting the Authorization Bearer token on the
+            # CloudFront-to-ALB hop. Without a cert (default) it uses HTTP:80.
             CustomOriginConfig:
-              OriginProtocolPolicy: http-only
+              OriginProtocolPolicy: !If [ApiOriginHttps, https-only, http-only]
               HTTPPort: 80
               HTTPSPort: 443
               OriginSSLProtocols:
                 - TLSv1.2
+            # Shared secret proving the request came from CloudFront; the ALB
+            # listener rule forwards only requests carrying this header.
+            OriginCustomHeaders: !If
+              - HasOriginVerifySecret
+              - - HeaderName: X-Origin-Verify
+                  HeaderValue: !Ref OriginVerifySecret
+              - !Ref AWS::NoValue
         DefaultCacheBehavior:
           TargetOriginId: spa-s3-origin
           ViewerProtocolPolicy: redirect-to-https

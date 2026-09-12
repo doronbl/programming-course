@@ -22,6 +22,9 @@ These cannot be known until deploy time. Gather them first:
 | Backend image tag / URI (`BackendImageTag` or `BackendImageUri`) | The image you push to ECR | `compute.yaml` |
 | ACM certificate ARN (`CertificateArn`) | *Optional.* An ACM cert in **us-east-1** for a custom domain | `network.yaml`, `storage.yaml` |
 | Custom domain (`DomainName`) | *Optional.* CNAME for CloudFront; requires `CertificateArn` | `storage.yaml` |
+| CloudFront prefix list (`CloudFrontPrefixListId`) | *Has a default.* AWS-managed prefix list `com.amazonaws.global.cloudfront.origin-facing`; in us-east-1 this is `pl-3b927c52`. See "Front-door hardening" below | `network.yaml` |
+| Origin-verify secret (`OriginVerifySecret`) | *Recommended.* A shared secret you generate; passed to both `network.yaml` and `storage.yaml` so the ALB only serves CloudFront traffic | `network.yaml`, `storage.yaml` |
+| Backend cert ARN (`BackendCertificateArn`) | *Optional.* Same ACM cert as the network `CertificateArn`; enables HTTPS on the CloudFront-to-ALB hop | `storage.yaml` |
 
 Ordering caveat worth calling out up front: **`auth` needs `AppUrl`, which is a
 storage-stack output.** Deploy storage before auth so its CloudFront `AppUrl`
@@ -42,16 +45,35 @@ cd infra
 Network first (VPC, subnets, NAT, ALB, target group with `/health:8000`), then
 the REGIONAL WAF that associates with the ALB.
 
+Generate a shared origin-verify secret first so the ALB only serves CloudFront
+traffic (see "Front-door hardening" below):
+
+```sh
+ORIGIN_SECRET=$(openssl rand -hex 32)
+echo "OriginVerifySecret=$ORIGIN_SECRET   # reuse this exact value for the storage stack"
+```
+
 ```sh
 aws cloudformation deploy --region $REGION \
   --stack-name programming-course-network \
   --template-file network.yaml \
-  --capabilities CAPABILITY_NAMED_IAM
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides OriginVerifySecret=$ORIGIN_SECRET
 
 aws cloudformation deploy --region $REGION \
   --stack-name programming-course-security \
   --template-file security.yaml \
   --parameter-overrides NetworkStackName=programming-course-network
+```
+
+The network stack defaults `CloudFrontPrefixListId` to `pl-3b927c52` (the
+us-east-1 id of `com.amazonaws.global.cloudfront.origin-facing`). Confirm the
+current id for your region and override if needed:
+
+```sh
+aws ec2 describe-managed-prefix-lists --region $REGION \
+  --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
+  --query 'PrefixLists[0].PrefixListId' --output text
 ```
 
 ### 2. Storage + CDN
@@ -60,11 +82,18 @@ Creates the private content bucket `course-content-<suffix>`, the private SPA
 bucket, and the CloudFront distribution (SPA default behavior + `/api/*` to the
 ALB with caching disabled). Then capture the `AppUrl` output for the next step.
 
+Pass the same `OriginVerifySecret` used for the network stack so CloudFront
+sends the header the ALB requires. Optionally pass `BackendCertificateArn`
+(the same ACM cert as the network `CertificateArn`) to encrypt the
+CloudFront-to-ALB hop.
+
 ```sh
 aws cloudformation deploy --region $REGION \
   --stack-name programming-course-storage \
   --template-file storage.yaml \
-  --parameter-overrides NetworkStackName=programming-course-network
+  --parameter-overrides \
+    NetworkStackName=programming-course-network \
+    OriginVerifySecret=$ORIGIN_SECRET
 
 APP_URL=$(aws cloudformation describe-stacks --region $REGION \
   --stack-name programming-course-storage \
@@ -160,6 +189,52 @@ DIST_ID=$(aws cloudformation describe-stacks --region $REGION \
 aws s3 sync out/ s3://$SPA_BUCKET/ --delete
 aws cloudfront create-invalidation --distribution-id $DIST_ID --paths '/*'
 ```
+
+## Front-door hardening (CloudFront is the only entry point)
+
+The design intent is that CloudFront is the single front door: it serves the
+SPA and proxies `/api/*` to the ALB. Two controls keep the ALB from being a
+second, open entry point, and a third addresses the in-AWS transport hop.
+
+1. **ALB ingress restricted to CloudFront edge ranges.** The ALB security group
+   allows inbound 80/443 only from the AWS-managed prefix list
+   `com.amazonaws.global.cloudfront.origin-facing` (`CloudFrontPrefixListId`,
+   default `pl-3b927c52` in us-east-1), not `0.0.0.0/0`. Arbitrary internet
+   clients cannot reach the ALB directly.
+
+2. **Shared-secret origin header.** When `OriginVerifySecret` is set (recommended),
+   CloudFront attaches an `X-Origin-Verify` header on the `/api/*` origin, and the
+   ALB listener forwards only requests carrying the matching value, returning
+   `403` otherwise. This defends against the small window where a non-CloudFront
+   caller happens to originate from within the prefix-list ranges. Use the *same*
+   secret value for the network and storage stacks. Rotate by updating both
+   stacks. Leaving it empty (default) forwards all traffic, which is only
+   appropriate for a throwaway dev deploy.
+
+3. **WAF keys on the real client IP.** The REGIONAL WebACL is associated with the
+   ALB, but requests arrive via CloudFront, so the ALB source IP is a CloudFront
+   edge address. The rate-based rule therefore uses `AggregateKeyType:
+   FORWARDED_IP` reading `X-Forwarded-For` (CloudFront appends the viewer IP), so
+   the limit is per end user rather than per edge node.
+
+### Residual risk: CloudFront-to-ALB transport
+
+By default the CloudFront `/api/*` origin connects to the ALB over **HTTP:80**.
+The `Authorization: Bearer <jwt>` header therefore crosses the CloudFront-to-ALB
+hop **in cleartext inside the AWS network** on the default (no-cert) deploy path.
+The viewer-to-CloudFront leg is always HTTPS (`redirect-to-https`), so this is an
+internal-hop exposure, not an internet one.
+
+To close it, deploy with a certificate:
+
+- Set `CertificateArn` on the network stack (adds the ALB HTTPS:443 listener).
+- Set `BackendCertificateArn` (the same ACM cert) on the storage stack. The
+  CloudFront `/api/*` origin then uses `https-only` and the Bearer token is
+  encrypted end to end.
+
+The no-cert default path remains deployable for scaffolding/dev; accept the
+internal-hop exposure there or supply a certificate for any environment handling
+real tokens.
 
 ## Verify
 
