@@ -2,7 +2,7 @@
   "id": "FEAT-002",
   "type": "feat",
   "description": "Create the backend FastAPI service in backend/, containerized with a python:3.12-slim + uvicorn Docker image. It exposes a public health endpoint for ALB health checks and a JWT-protected /hello endpoint returning 'Hello World'. JWTs are Cognito-issued and verified against the Cognito JWKS. The service reads config from the env vars defined in infra/compute.yaml (FEAT-001) and has IAM access to the content S3 bucket (a small helper to read from S3 demonstrates the wiring). Depends on FEAT-001 for exact env var names, container port 8000, and health path /health.",
-  "status": "pending",
+  "status": "completed",
   "steps": [
     "Create backend/pyproject.toml (or requirements.txt) pinning: fastapi, uvicorn[standard], python-jose[cryptography] (or PyJWT[crypto]) for JWT verification, httpx (fetch JWKS), boto3 (S3), pydantic-settings, pytest, respx/pytest-httpx for tests.",
     "backend/app/config.py: pydantic-settings Settings reading COGNITO_USER_POOL_ID, COGNITO_REGION (default us-east-1), COGNITO_CLIENT_ID, COGNITO_ISSUER (default built as https://cognito-idp.<region>.amazonaws.com/<pool_id>), AWS_REGION, CONTENT_BUCKET, PORT (default 8000). Names MUST match infra/compute.yaml env vars.",
@@ -27,5 +27,5 @@
     "Optionally run the container and curl http://localhost:8000/health expecting 200 and /hello without token expecting 401."
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Implemented backend/ FastAPI service. Routing decision (documented in backend/README.md and app/main.py): CloudFront forwards /api/* to the ALB WITHOUT stripping the /api prefix (confirmed in infra/storage.yaml), so protected routes are served under /api (hello at /api/hello). /health stays at root because the ALB hits the container directly. Env var names verified against infra/compute.yaml exactly: COGNITO_USER_POOL_ID, COGNITO_REGION (default us-east-1), COGNITO_CLIENT_ID, COGNITO_ISSUER (default built from region+pool), AWS_REGION, CONTENT_BUCKET, PORT (default 8000). JWT verification uses PyJWT[crypto] RS256 against the Cognito JWKS, validating signature + issuer + expiry, plus token_use (access|id) and client id (client_id for access tokens, aud for id tokens). JWKS client is injectable via FastAPI get_jwks_client dependency; tests override it with a local RSA keypair (dependency_overrides) so verification is exercised end-to-end without network. Deps in requirements.txt (fastapi, uvicorn[standard], PyJWT[crypto], httpx, boto3, pydantic-settings); dev deps in requirements-dev.txt (pytest, respx). Verification: 8 pytest tests pass on Python 3.12.13 (pyenv). docker build succeeds (HEALTHCHECK warning is benign under the OCI builder). Ran container: GET /health -> 200, GET /api/hello without token -> 401. Note: used PyJWT rather than python-jose (both were listed as acceptable). respx is included in dev deps though the current tests mock via dependency_overrides rather than HTTP mocking."
 }
