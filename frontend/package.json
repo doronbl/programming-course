@@ -1,0 +1,27 @@
+{
+  "name": "programming-course-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Static-exported Next.js SPA for the programming-course app. Google-only login via Cognito Managed Login (OAuth2 Authorization Code + PKCE).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "15.5.25",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "3.2.0",
+    "@types/node": "22.10.7",
+    "@types/react": "19.1.9",
+    "@types/react-dom": "19.1.7",
+    "eslint": "9.18.0",
+    "eslint-config-next": "15.5.25",
+    "typescript": "5.7.3"
+  }
+}
