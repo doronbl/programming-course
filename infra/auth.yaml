@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  programming-course auth stack (us-east-1): a Cognito User Pool federated with
+  Google as the ONLY identity provider, Managed Login v2, and a public SPA client
+  using the OAuth2 authorization code flow (PKCE, no client secret).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: programming-course
+    Description: Prefix used to name/tag resources.
+  GoogleClientId:
+    Type: String
+    NoEcho: true
+    Description: OAuth 2.0 client id from Google Cloud console.
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Description: OAuth 2.0 client secret from Google Cloud console.
+  CognitoDomainPrefix:
+    Type: String
+    Description: >-
+      Globally-unique prefix for the Cognito hosted/managed login domain, e.g.
+      programming-course-<something>. Becomes <prefix>.auth.us-east-1.amazoncognito.com.
+    AllowedPattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+  AppUrl:
+    Type: String
+    Description: >-
+      Public application URL (CloudFront domain or custom domain, e.g.
+      https://dxxxx.cloudfront.net). Used to build OAuth callback/logout URLs.
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ProjectName}-users'
+      # Login is Google-only; email is the primary attribute we map/consume.
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UserPoolTags:
+        Name: !Sub '${ProjectName}-users'
+
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: 'openid email profile'
+      AttributeMapping:
+        email: email
+        username: sub
+        name: name
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    # The client must not be created before the Google IdP it references.
+    DependsOn: GoogleIdentityProvider
+    Properties:
+      ClientName: !Sub '${ProjectName}-spa'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - Google
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Sub '${AppUrl}/'
+        - !Sub '${AppUrl}/index.html'
+      LogoutURLs:
+        - !Sub '${AppUrl}/'
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref UserPool
+      ManagedLoginVersion: 2
+
+  ManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool id (backend COGNITO_USER_POOL_ID).
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+  UserPoolClientId:
+    Description: Cognito app client id (backend COGNITO_CLIENT_ID, frontend client).
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+  CognitoDomainUrl:
+    Description: Full Managed Login domain URL for the hosted redirect flow.
+    Value: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoDomainUrl'
+  IssuerUrl:
+    Description: OIDC issuer URL (backend COGNITO_ISSUER) for JWT validation.
+    Value: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+    Export:
+      Name: !Sub '${AWS::StackName}-IssuerUrl'
+  JwksUrl:
+    Description: JWKS URL used by the backend to verify token signatures.
+    Value: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}/.well-known/jwks.json'
+    Export:
+      Name: !Sub '${AWS::StackName}-JwksUrl'

@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-002",
+  "type": "feat",
+  "description": "Create the backend FastAPI service in backend/, containerized with a python:3.12-slim + uvicorn Docker image. It exposes a public health endpoint for ALB health checks and a JWT-protected /hello endpoint returning 'Hello World'. JWTs are Cognito-issued and verified against the Cognito JWKS. The service reads config from the env vars defined in infra/compute.yaml (FEAT-001) and has IAM access to the content S3 bucket (a small helper to read from S3 demonstrates the wiring). Depends on FEAT-001 for exact env var names, container port 8000, and health path /health.",
+  "status": "completed",
+  "steps": [
+    "Create backend/pyproject.toml (or requirements.txt) pinning: fastapi, uvicorn[standard], python-jose[cryptography] (or PyJWT[crypto]) for JWT verification, httpx (fetch JWKS), boto3 (S3), pydantic-settings, pytest, respx/pytest-httpx for tests.",
+    "backend/app/config.py: pydantic-settings Settings reading COGNITO_USER_POOL_ID, COGNITO_REGION (default us-east-1), COGNITO_CLIENT_ID, COGNITO_ISSUER (default built as https://cognito-idp.<region>.amazonaws.com/<pool_id>), AWS_REGION, CONTENT_BUCKET, PORT (default 8000). Names MUST match infra/compute.yaml env vars.",
+    "backend/app/auth.py: fetch and cache the Cognito JWKS from <issuer>/.well-known/jwks.json; a FastAPI dependency get_current_user that reads the Bearer token, verifies signature against JWKS (RS256), validates issuer and token_use ('access' or 'id') and expiry, and returns claims. On failure raise HTTP 401. Structure so the JWKS client is injectable/mocked in tests.",
+    "backend/app/s3.py: a small boto3 client wrapper with a function to list/get objects from CONTENT_BUCKET, demonstrating the task role S3 access (used by a future content API; keep minimal).",
+    "backend/app/main.py: FastAPI app. Public GET /health -> {'status':'ok'} (no auth) for the ALB target group. Protected GET /hello depending on get_current_user -> returns 'Hello World' (JSON like {'message':'Hello World'} or plain text 'Hello World'; keep the exact string 'Hello World'). Mount routes so that behind CloudFront '/api/*' the paths resolve (decide whether app serves /api/hello or /hello and document it; the ALB receives what CloudFront forwards — align with frontend FEAT-003 and infra path behavior). Include a root or docs route as convenient.",
+    "backend/Dockerfile: FROM python:3.12-slim, install deps, copy app, expose 8000, run `uvicorn app.main:app --host 0.0.0.0 --port 8000`. Add a HEALTHCHECK hitting /health optionally. Add backend/.dockerignore.",
+    "backend/tests/: pytest tests. test_health: GET /health returns 200 without auth. test_hello_requires_auth: GET /hello without token -> 401. test_hello_with_valid_token: mock JWKS/verification so a valid token yields 200 and body contains 'Hello World'. test_hello_invalid_token -> 401. Use FastAPI TestClient and dependency_overrides or mocked JWKS.",
+    "backend/README.md: how to run locally (uvicorn), env vars, how to build/run the Docker image, and how the ALB health check and Cognito JWT verification work."
+  ],
+  "acceptance_criteria": [
+    "GET /health returns HTTP 200 with no Authorization header (satisfies ALB health check).",
+    "GET the protected hello route without a valid Bearer token returns HTTP 401.",
+    "GET the protected hello route with a valid (mocked) Cognito token returns HTTP 200 and the response body contains the exact string 'Hello World'.",
+    "JWT verification validates the signature against the Cognito JWKS and checks issuer and expiry (not merely decoding without verification).",
+    "The container image builds with `docker build backend/` and starts uvicorn on port 8000.",
+    "Config env var names in backend match those declared in infra/compute.yaml exactly."
+  ],
+  "verification": [
+    "Run backend tests with python 3.12: `pyenv local 3.12 || true` then create a venv, install deps, and run `pytest backend/tests -q`. Confirm all tests pass.",
+    "Run `docker build -t course-backend backend/` and confirm the image builds successfully.",
+    "Optionally run the container and curl http://localhost:8000/health expecting 200 and /hello without token expecting 401."
+  ],
+  "blocked_reason": null,
+  "findings": "Implemented backend/ FastAPI service. Routing decision (documented in backend/README.md and app/main.py): CloudFront forwards /api/* to the ALB WITHOUT stripping the /api prefix (confirmed in infra/storage.yaml), so protected routes are served under /api (hello at /api/hello). /health stays at root because the ALB hits the container directly. Env var names verified against infra/compute.yaml exactly: COGNITO_USER_POOL_ID, COGNITO_REGION (default us-east-1), COGNITO_CLIENT_ID, COGNITO_ISSUER (default built from region+pool), AWS_REGION, CONTENT_BUCKET, PORT (default 8000). JWT verification uses PyJWT[crypto] RS256 against the Cognito JWKS, validating signature + issuer + expiry, plus token_use (access|id) and client id (client_id for access tokens, aud for id tokens). JWKS client is injectable via FastAPI get_jwks_client dependency; tests override it with a local RSA keypair (dependency_overrides) so verification is exercised end-to-end without network. Deps in requirements.txt (fastapi, uvicorn[standard], PyJWT[crypto], httpx, boto3, pydantic-settings); dev deps in requirements-dev.txt (pytest, respx). Verification: 8 pytest tests pass on Python 3.12.13 (pyenv). docker build succeeds (HEALTHCHECK warning is benign under the OCI builder). Ran container: GET /health -> 200, GET /api/hello without token -> 401. Note: used PyJWT rather than python-jose (both were listed as acceptable). respx is included in dev deps though the current tests mock via dependency_overrides rather than HTTP mocking.",
+  "review_fixes": "Review 2026-09-12-185023 (Issue 5, token choice) documented, no behavior change: added a docstring note on GET /api/hello in backend/app/main.py explaining that /hello only confirms a valid session so it accepts either access or id token (matching auth._verify_client), while identity-bearing routes should require the id token and be decided per endpoint. Backend verification re-run on Python 3.12.13 venv: pip install -r requirements.txt -r requirements-dev.txt then pytest backend/tests -q => 8 passed. No stray backend/.python-version committed; backend/.venv stays gitignored."
+}

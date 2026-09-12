@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  programming-course security stack (us-east-1): a REGIONAL WAFv2 WebACL with the
+  AWS common rule set, known bad inputs, and a rate-based rule, associated with
+  the internet-facing ALB from the network stack.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: programming-course
+    Description: Prefix used to name/tag resources.
+  NetworkStackName:
+    Type: String
+    Default: programming-course-network
+    Description: Name of the deployed network stack to import the ALB ARN from.
+  RateLimit:
+    Type: Number
+    Default: 2000
+    Description: Max requests allowed per 5-minute window per source IP.
+
+Resources:
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${ProjectName}-alb-acl'
+      Description: REGIONAL WebACL protecting the programming-course ALB.
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ProjectName}-alb-acl'
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+        # This WebACL is REGIONAL and associated with the ALB, but requests
+        # arrive proxied through CloudFront, so the ALB source IP is a CloudFront
+        # edge address. Keying the rate limit on FORWARDED_IP reads the real
+        # client IP from X-Forwarded-For (CloudFront appends the viewer IP), so
+        # the limit is per end user rather than per edge node.
+        - Name: RateLimitPerForwardedIp
+          Priority: 2
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref RateLimit
+              AggregateKeyType: FORWARDED_IP
+              ForwardedIPConfig:
+                HeaderName: X-Forwarded-For
+                FallbackBehavior: MATCH
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitPerForwardedIp
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-acl'
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn:
+        Fn::ImportValue: !Sub '${NetworkStackName}-AlbArn'
+      WebACLArn: !GetAtt WebAcl.Arn
+
+Outputs:
+  WebAclArn:
+    Description: ARN of the REGIONAL WebACL associated with the ALB.
+    Value: !GetAtt WebAcl.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-WebAclArn'
+  WebAclId:
+    Description: Id of the REGIONAL WebACL.
+    Value: !GetAtt WebAcl.Id
+    Export:
+      Name: !Sub '${AWS::StackName}-WebAclId'

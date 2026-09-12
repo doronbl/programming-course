@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  programming-course network stack (us-east-1): VPC with 2 public + 2 private
+  subnets across 2 AZs, IGW, NAT gateway, internet-facing ALB, and an IP-type
+  target group with a /health:8000 health check for the Fargate backend.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: programming-course
+    Description: Prefix used to name/tag resources.
+  ContainerPort:
+    Type: Number
+    Default: 8000
+    Description: Port the backend container listens on (must match compute.yaml).
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: ALB target group health check path served by the backend.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional ACM certificate ARN (us-east-1). If provided, an HTTPS:443
+      listener is added to the ALB in addition to HTTP:80.
+  CloudFrontPrefixListId:
+    Type: String
+    Default: pl-3b927c52
+    Description: >-
+      AWS-managed prefix list id for com.amazonaws.global.cloudfront.origin-facing.
+      In us-east-1 this is pl-3b927c52. Only CloudFront origin-facing edge ranges
+      in this prefix list are allowed to reach the ALB, so the ALB is not a second
+      open front door. Confirm the current id with:
+      aws ec2 describe-managed-prefix-lists --filters
+      Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+  OriginVerifySecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Shared secret sent by CloudFront in the X-Origin-Verify header. When set,
+      the ALB only forwards requests carrying this header value and returns 403
+      to anything else, so requests must transit CloudFront. Must match the
+      value configured on the CloudFront /api/* origin in the storage stack.
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  HasOriginVerifySecret: !Not [!Equals [!Ref OriginVerifySecret, '']]
+
+Mappings:
+  Subnets:
+    VPC:
+      Cidr: 10.0.0.0/16
+    PublicOne:
+      Cidr: 10.0.0.0/24
+    PublicTwo:
+      Cidr: 10.0.1.0/24
+    PrivateOne:
+      Cidr: 10.0.10.0/24
+    PrivateTwo:
+      Cidr: 10.0.11.0/24
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [Subnets, VPC, Cidr]
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [Subnets, PublicOne, Cidr]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-1'
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !FindInMap [Subnets, PublicTwo, Cidr]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-2'
+
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [Subnets, PrivateOne, Cidr]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-1'
+
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !FindInMap [Subnets, PrivateTwo, Cidr]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-2'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-nat-eip'
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-nat'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-rt'
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetOne
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetTwo
+      RouteTableId: !Ref PrivateRouteTable
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} ALB security group'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: HTTP from CloudFront origin-facing edge ranges only
+        - !If
+          - HasCertificate
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            SourcePrefixListId: !Ref CloudFrontPrefixListId
+            Description: HTTPS from CloudFront origin-facing edge ranges only
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-sg'
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb'
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-tg'
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      VpcId: !Ref VPC
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-tg'
+
+  # When an origin-verify secret is configured, the listener default action
+  # rejects any request that does not carry the shared header (i.e. did not
+  # transit CloudFront). A higher-priority rule forwards verified requests.
+  # With no secret configured the listener forwards everything (dev/default).
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions: !If
+        - HasOriginVerifySecret
+        - - Type: fixed-response
+            FixedResponseConfig:
+              StatusCode: '403'
+              ContentType: text/plain
+              MessageBody: Direct access is not allowed. Requests must transit CloudFront.
+        - - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  HttpOriginVerifyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasOriginVerifySecret
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Verify
+            Values:
+              - !Ref OriginVerifySecret
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions: !If
+        - HasOriginVerifySecret
+        - - Type: fixed-response
+            FixedResponseConfig:
+              StatusCode: '403'
+              ContentType: text/plain
+              MessageBody: Direct access is not allowed. Requests must transit CloudFront.
+        - - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  HttpsOriginVerifyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Verify
+            Values:
+              - !If [HasOriginVerifySecret, !Ref OriginVerifySecret, 'disabled']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  VpcId:
+    Description: VPC id.
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+  PublicSubnetIds:
+    Description: Comma-separated public subnet ids.
+    Value: !Join [',', [!Ref PublicSubnetOne, !Ref PublicSubnetTwo]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetIds'
+  PrivateSubnetIds:
+    Description: Comma-separated private subnet ids (for the ECS service).
+    Value: !Join [',', [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetIds'
+  AlbSecurityGroupId:
+    Description: Security group id of the ALB.
+    Value: !Ref AlbSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AlbSecurityGroupId'
+  AlbArn:
+    Description: ARN of the Application Load Balancer.
+    Value: !Ref LoadBalancer
+    Export:
+      Name: !Sub '${AWS::StackName}-AlbArn'
+  AlbDnsName:
+    Description: Public DNS name of the ALB (CloudFront /api/* origin).
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-AlbDnsName'
+  AlbCanonicalHostedZoneId:
+    Description: ALB canonical hosted zone id (for Route53 alias records).
+    Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${AWS::StackName}-AlbCanonicalHostedZoneId'
+  HttpListenerArn:
+    Description: ARN of the HTTP:80 listener.
+    Value: !Ref HttpListener
+    Export:
+      Name: !Sub '${AWS::StackName}-HttpListenerArn'
+  TargetGroupArn:
+    Description: ARN of the IP target group registered by the ECS service.
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupArn'
+  ContainerPort:
+    Description: Backend container port (shared across stacks).
+    Value: !Ref ContainerPort
+    Export:
+      Name: !Sub '${AWS::StackName}-ContainerPort'

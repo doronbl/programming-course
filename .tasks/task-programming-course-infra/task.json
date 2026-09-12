@@ -1,0 +1,24 @@
+{
+  "task_id": "task-programming-course-infra",
+  "task_description": "Scaffold the programming-course AWS application in a monorepo (us-east-1): CloudFormation infra (S3 content bucket with dynamic postfix, Cognito Managed Login with Google-only federated login, ALB fronting an ECS Fargate SPOT backend, ECR, CloudFront serving the SPA and proxying /api/* to the ALB with caching disabled, WAF), a FastAPI+uvicorn Docker backend with a public /health check and a Cognito-JWT-protected /hello returning 'Hello World' plus S3 access, and a static-exported Next.js SPA whose register/login both use Cognito Managed Login PKCE redirect to Google and a button that calls /hello. Deliverable is valid, self-consistent source + templates, not a live deploy.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "pass",
+    "tests": "pass",
+    "test_quality": "pass",
+    "docker_build": "pass",
+    "summary": "cfn-lint infra/*.yaml exit 0; backend pytest 8/8 pass on Python 3.12; frontend npm run build produces out/index.html + out/config.json with tsc/lint clean; docker build backend/ succeeds. Test quality: backend tests sign real RS256 tokens and stub only the JWKS key lookup, so signature/issuer/expiry/token_use/client checks in auth.py run for real and negative cases (expired, wrong issuer, wrong client, malformed) exercise those paths."
+  },
+  "semantic_review": {
+    "iterations": 2,
+    "final_verdict": "APPROVED",
+    "v1": "NEEDS_CHANGES - blocking: frontend/lib/*.ts untracked due to stock Python .gitignore lib/ rule; plus ALB open to internet, WAF rate limit keyed on edge IPs, cleartext CloudFront->ALB hop, token-type intent.",
+    "v2": "APPROVED - blocking git-tracking defect fixed (files tracked, .gitignore rules root-anchored); ALB ingress scoped to CloudFront prefix list + optional X-Origin-Verify shared secret; WAF rate rule switched to FORWARDED_IP; origin protocol https-only when BackendCertificateArn set (default http-only documented). Two non-blocking residual items documented (hardening is opt-in by default; HttpsOriginVerifyRule gated on cert rather than secret).",
+    "review_files": [
+      ".tasks/task-programming-course-infra/2026-09-12-185023-review.md",
+      ".tasks/task-programming-course-infra/2026-09-12-190500-review.md"
+    ]
+  }
+}

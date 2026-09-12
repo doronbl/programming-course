@@ -1,0 +1,6 @@
+{
+  "cognitoDomain": "https://REPLACE_ME.auth.us-east-1.amazoncognito.com",
+  "clientId": "REPLACE_ME_USER_POOL_CLIENT_ID",
+  "region": "us-east-1",
+  "apiBase": "/api"
+}
