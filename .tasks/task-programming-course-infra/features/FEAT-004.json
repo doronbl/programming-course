@@ -1,0 +1,24 @@
+{
+  "id": "FEAT-004",
+  "type": "docs",
+  "description": "Cross-cutting consistency pass and top-level documentation. Verify that infra, backend, and frontend agree on every shared value (bucket names, container port, health path, /api/* path mapping, Cognito outputs -> backend env vars -> frontend config), and write a top-level README plus a DEPLOY doc listing the end-to-end deploy order and every deploy-time parameter the user must supply. Depends on FEAT-001, FEAT-002, FEAT-003.",
+  "status": "pending",
+  "steps": [
+    "Update the repository root README.md: describe the monorepo layout (infra/, backend/, frontend/), the architecture (Google-only login via Cognito Managed Login + PKCE; ECS Fargate SPOT backend behind ALB; CloudFront serving SPA + proxying /api/* to ALB with caching disabled; S3 content bucket; WAF), and that this pass delivers scaffolding not a live deploy. Note the future product scope (hierarchical sections/lectures, per-language content, progress tracking) as out of scope for this pass.",
+    "Create DEPLOY.md (or infra/DEPLOY.md) with the full ordered deploy procedure: (1) deploy network+security, (2) storage+CDN, (3) auth (needs CloudFront domain for callback URLs — document the ordering/2-pass or parameter approach), (4) push backend image to ECR, (5) deploy compute, (6) build+upload frontend to SPA bucket + invalidate CloudFront. List EVERY deploy-time parameter: GoogleClientId, GoogleClientSecret, Cognito domain prefix, backend image tag/URI, optional ACM cert ARN + custom domain, app/callback URL.",
+    "Verify consistency across the three areas and fix any mismatches: container port 8000; health path /health; API path /api/* in CloudFront maps to the backend hello route; content bucket name pattern 'course-content-<suffix>'; Cognito output names (user pool id, client id, issuer, domain) match backend env var names in compute.yaml and frontend config keys.",
+    "Add a short 'deploy-time parameters / TODO' section listing values that cannot be known until deploy (Google OAuth client id/secret, chosen Cognito domain prefix, optional custom domain/cert) so the orchestrator can surface them."
+  ],
+  "acceptance_criteria": [
+    "Root README.md documents layout, architecture, and scope of this pass.",
+    "A DEPLOY doc exists listing ordered deploy steps and every deploy-time parameter.",
+    "No cross-area inconsistencies remain: port, health path, /api/* mapping, bucket name pattern, and Cognito value names all line up between infra, backend, and frontend.",
+    "Deploy-time-only values are explicitly enumerated for the orchestrator to surface."
+  ],
+  "verification": [
+    "Re-run cfn-lint / template parse from FEAT-001 and backend pytest from FEAT-002 and frontend build from FEAT-003 to confirm nothing regressed.",
+    "Manually confirm (by reading) that the shared values match across infra/compute.yaml env vars, backend/app/config.py, and frontend config."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

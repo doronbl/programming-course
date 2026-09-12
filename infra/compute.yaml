@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  programming-course compute stack (us-east-1): an ECR repository, an ECS cluster
+  with FARGATE + FARGATE_SPOT capacity providers, a task definition for the FastAPI
+  backend (container port 8000), and a service running on FARGATE_SPOT in private
+  subnets, registered to the ALB target group with S3 access to the content bucket.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: programming-course
+    Description: Prefix used to name/tag resources.
+  NetworkStackName:
+    Type: String
+    Default: programming-course-network
+    Description: Name of the deployed network stack (VPC, subnets, ALB, target group).
+  StorageStackName:
+    Type: String
+    Default: programming-course-storage
+    Description: Name of the deployed storage stack (content bucket).
+  AuthStackName:
+    Type: String
+    Default: programming-course-auth
+    Description: Name of the deployed auth stack (Cognito user pool + client).
+  BackendImageUri:
+    Type: String
+    Default: ''
+    Description: >-
+      Full backend image URI (e.g. <acct>.dkr.ecr.us-east-1.amazonaws.com/course-backend:latest).
+      Leave empty to build from BackendImageTag against the ECR repo created here.
+  BackendImageTag:
+    Type: String
+    Default: latest
+    Description: >-
+      Image tag to run when BackendImageUri is not supplied. The image URI is then
+      built as <this-repo-uri>:<tag>.
+  ContainerPort:
+    Type: Number
+    Default: 8000
+    Description: Port the backend container listens on (must match network.yaml).
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Desired number of running backend tasks.
+  TaskCpu:
+    Type: String
+    Default: '256'
+    Description: Fargate task CPU units.
+  TaskMemory:
+    Type: String
+    Default: '512'
+    Description: Fargate task memory (MiB).
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    Description: CloudWatch Logs retention for the backend service.
+
+Conditions:
+  UseProvidedImageUri: !Not [!Equals [!Ref BackendImageUri, '']]
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: course-backend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-backend-ecr'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-backend'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  ClusterCapacityProviders:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref Cluster
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+          Base: 0
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-task-exec'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-task'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: content-bucket-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  Fn::ImportValue: !Sub '${StorageStackName}-ContentBucketArn'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub
+                  - '${BucketArn}/*'
+                  - BucketArn:
+                      Fn::ImportValue: !Sub '${StorageStackName}-ContentBucketArn'
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} backend service security group'
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub '${NetworkStackName}-AlbSecurityGroupId'
+          Description: Backend port from the ALB only
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-service-sg'
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-backend'
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: backend
+          Image: !If
+            - UseProvidedImageUri
+            - !Ref BackendImageUri
+            - !Sub '${EcrRepository.RepositoryUri}:${BackendImageTag}'
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: COGNITO_USER_POOL_ID
+              Value:
+                Fn::ImportValue: !Sub '${AuthStackName}-UserPoolId'
+            - Name: COGNITO_REGION
+              Value: us-east-1
+            - Name: COGNITO_CLIENT_ID
+              Value:
+                Fn::ImportValue: !Sub '${AuthStackName}-UserPoolClientId'
+            - Name: COGNITO_ISSUER
+              Value:
+                Fn::ImportValue: !Sub '${AuthStackName}-IssuerUrl'
+            - Name: AWS_REGION
+              Value: us-east-1
+            - Name: CONTENT_BUCKET
+              Value:
+                Fn::ImportValue: !Sub '${StorageStackName}-ContentBucketName'
+            - Name: PORT
+              Value: '8000'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+
+  Service:
+    Type: AWS::ECS::Service
+    # The ALB HTTP listener must exist before the service registers targets.
+    DependsOn: ClusterCapacityProviders
+    Properties:
+      ServiceName: !Sub '${ProjectName}-backend'
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+          Base: 0
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Split
+            - ','
+            - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnetIds'
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn:
+            Fn::ImportValue: !Sub '${NetworkStackName}-TargetGroupArn'
+
+Outputs:
+  EcrRepositoryUri:
+    Description: URI of the backend ECR repository (push target for the image).
+    Value: !GetAtt EcrRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-EcrRepositoryUri'
+  ClusterName:
+    Description: ECS cluster name.
+    Value: !Ref Cluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterName'
+  ServiceName:
+    Description: ECS service name.
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceName'
+  ServiceSecurityGroupId:
+    Description: Security group id of the backend service.
+    Value: !Ref ServiceSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceSecurityGroupId'
+  TaskRoleArn:
+    Description: ARN of the task role with content-bucket access.
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskRoleArn'

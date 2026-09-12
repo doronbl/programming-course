@@ -1,0 +1,28 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "Create the frontend in frontend/ as a static-exported Next.js SPA (output: 'export', client-side rendered) served via CloudFront + S3. Registration and login both initiate the Cognito Managed Login hosted redirect to Google using OAuth2 Authorization Code + PKCE (no in-app username/password form). After login, the app holds the tokens client-side and shows a single button that calls the protected /hello endpoint through CloudFront (/api/*) and prints the response. Depends on FEAT-001 (Cognito domain, client id, CloudFront /api/* behavior) and FEAT-002 (hello route path).",
+  "status": "pending",
+  "steps": [
+    "Create frontend/package.json with next, react, react-dom and scripts (dev, build, lint). Use Next.js app or pages router; keep it minimal SPA.",
+    "frontend/next.config.js: set output: 'export' (static export to out/), images.unoptimized true, and any basePath needed. Confirm it produces a fully static site with no SSR/Lambda@Edge.",
+    "frontend/lib/auth.ts: implement Authorization Code + PKCE against Cognito Managed Login. Generate code_verifier/code_challenge, redirect the browser to https://<cognito-domain>/oauth2/authorize?response_type=code&client_id=<clientId>&redirect_uri=<appUrl>&scope=openid+email+profile&identity_provider=Google&code_challenge=...&code_challenge_method=S256. Handle the redirect back: exchange the code at https://<cognito-domain>/oauth2/token (public client, no secret, with code_verifier) for tokens; store the access/id token in memory or sessionStorage. Provide login(), register() (both trigger the same hosted redirect; register may pass a prompt/param but Google-only means both start the hosted flow), and logout() hitting the Cognito /logout endpoint.",
+    "Config: read Cognito domain, client id, region, and API base URL from public runtime config (e.g., NEXT_PUBLIC_ env vars baked at build, or a /config.json fetched at runtime so the same static build works across deploys). Document that these come from infra outputs. API base URL is '/api' (same-origin via CloudFront).",
+    "frontend/app (or pages): a single page. If not authenticated show 'Login with Google' and 'Register with Google' buttons that call login()/register(). A callback route/handler processes the ?code= redirect. When authenticated show a 'Call /hello' button that fetches `${apiBase}/hello` (i.e. /api/hello through CloudFront) with Authorization: Bearer <token> and prints the response text on the page.",
+    "Ensure the API path aligns with FEAT-001 CloudFront '/api/*' behavior and FEAT-002 backend route so that a call to /api/hello reaches the backend hello handler and returns 'Hello World'. Document the exact path mapping.",
+    "frontend/README.md: how to install (npm ci), run dev, build the static export (npm run build -> out/), the required NEXT_PUBLIC_/config values sourced from infra outputs, and how the PKCE Managed Login flow works."
+  ],
+  "acceptance_criteria": [
+    "`npm ci && npm run build` in frontend/ succeeds and produces a static export in frontend/out/ with an index.html (no server runtime required).",
+    "The auth module builds the Cognito Managed Login authorize URL with response_type=code, code_challenge_method=S256, identity_provider=Google, and the configured scopes; there is no in-app username/password form.",
+    "The authenticated view has a single button that calls the /hello endpoint via /api and renders the returned response.",
+    "Cognito domain, client id, and API base are read from configuration (not hardcoded per-deploy), and the README documents which infra outputs supply them.",
+    "next lint / tsc passes (no type or lint errors that fail the build)."
+  ],
+  "verification": [
+    "Run `cd frontend && npm ci && npm run build` and confirm it exits 0 and frontend/out/index.html exists.",
+    "Run `cd frontend && npx tsc --noEmit` (if TypeScript) and/or `npm run lint` and confirm no errors."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

@@ -1,0 +1,7 @@
+{
+  "task_id": "task-programming-course-infra",
+  "task_description": "Scaffold the programming-course AWS application in a monorepo (us-east-1): CloudFormation infra (S3 content bucket with dynamic postfix, Cognito Managed Login with Google-only federated login, ALB fronting an ECS Fargate SPOT backend, ECR, CloudFront serving the SPA and proxying /api/* to the ALB with caching disabled, WAF), a FastAPI+uvicorn Docker backend with a public /health check and a Cognito-JWT-protected /hello returning 'Hello World' plus S3 access, and a static-exported Next.js SPA whose register/login both use Cognito Managed Login PKCE redirect to Google and a button that calls /hello. Deliverable is valid, self-consistent source + templates, not a live deploy.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}
