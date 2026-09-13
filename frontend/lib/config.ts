@@ -9,7 +9,7 @@
 //   cognitoDomain <- auth stack output  CognitoDomainUrl
 //   clientId      <- auth stack output  UserPoolClientId
 //   region        <- deploy region (us-east-1)
-//   apiBase       <- always '/api' (same-origin, proxied by CloudFront)
+//   apiBase       <- always '/api' (same-origin, path-routed by the ALB)
 
 export interface AppConfig {
   cognitoDomain: string;

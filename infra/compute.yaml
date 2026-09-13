@@ -323,7 +323,7 @@ Resources:
           # these values on start so the static export stays environment-agnostic.
           Environment:
             - Name: PORT
-              Value: !Ref FrontendContainerPort
+              Value: !Sub '${FrontendContainerPort}'
             - Name: COGNITO_DOMAIN
               Value:
                 Fn::ImportValue: !Sub '${AuthStackName}-CognitoDomainUrl'
