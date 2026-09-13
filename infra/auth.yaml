@@ -1,8 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   programming-course auth stack (us-east-1): a Cognito User Pool federated with
-  Google as the ONLY identity provider, Managed Login v2, and a public SPA client
-  using the OAuth2 authorization code flow (PKCE, no client secret).
+  Google as the ONLY identity provider, Managed Login v2, a public SPA client
+  using the OAuth2 authorization code flow (PKCE, no client secret), and a
+  confidential app client used by the ALB authenticate-cognito action at the
+  public front door.
 
 Parameters:
   ProjectName:
@@ -26,8 +28,10 @@ Parameters:
   AppUrl:
     Type: String
     Description: >-
-      Public application URL (CloudFront domain or custom domain, e.g.
-      https://dxxxx.cloudfront.net). Used to build OAuth callback/logout URLs.
+      Public application URL served by the ALB, e.g.
+      https://programming-course.doronbl.people.aws.dev. Used to build OAuth
+      callback/logout URLs for both the SPA client and the ALB front-door client
+      (the ALB authenticate-cognito action calls back to <AppUrl>/oauth2/idpresponse).
 
 Resources:
   UserPool:
@@ -98,6 +102,43 @@ Resources:
         IdToken: minutes
         RefreshToken: days
 
+  # Confidential client used exclusively by the ALB authenticate-cognito action.
+  # ALB OIDC needs a client WITH a secret and the code flow, whose callback is
+  # the ALB's own /oauth2/idpresponse endpoint on the public app URL. This is
+  # separate from the SPA client so browser PKCE and edge auth do not share a
+  # client configuration.
+  AlbUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: GoogleIdentityProvider
+    Properties:
+      ClientName: !Sub '${ProjectName}-alb'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      SupportedIdentityProviders:
+        - Google
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Sub '${AppUrl}/oauth2/idpresponse'
+      LogoutURLs:
+        - !Sub '${AppUrl}/'
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
   UserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
@@ -118,11 +159,26 @@ Outputs:
     Value: !Ref UserPool
     Export:
       Name: !Sub '${AWS::StackName}-UserPoolId'
+  UserPoolArn:
+    Description: Cognito User Pool ARN (ALB authenticate-cognito action).
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolArn'
   UserPoolClientId:
-    Description: Cognito app client id (backend COGNITO_CLIENT_ID, frontend client).
+    Description: Cognito app client id (backend COGNITO_CLIENT_ID, frontend SPA client).
     Value: !Ref UserPoolClient
     Export:
       Name: !Sub '${AWS::StackName}-UserPoolClientId'
+  AlbUserPoolClientId:
+    Description: Confidential app client id used by the ALB authenticate-cognito action.
+    Value: !Ref AlbUserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-AlbUserPoolClientId'
+  CognitoDomainPrefix:
+    Description: Cognito user pool domain prefix (ALB authenticate-cognito UserPoolDomain).
+    Value: !Ref CognitoDomainPrefix
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoDomainPrefix'
   CognitoDomainUrl:
     Description: Full Managed Login domain URL for the hosted redirect flow.
     Value: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'

@@ -1,8 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   programming-course network stack (us-east-1): VPC with 2 public + 2 private
-  subnets across 2 AZs, IGW, NAT gateway, internet-facing ALB, and an IP-type
-  target group with a /health:8000 health check for the Fargate backend.
+  subnets across 2 AZs, IGW, NAT gateway, and an internet-facing ALB that is the
+  public front door. The HTTPS:443 listener challenges every request with
+  Cognito (authenticate-cognito) and then forwards to the Next.js frontend
+  target group by default, or to the FastAPI backend target group for /api/*.
+  HTTP:80 redirects to HTTPS:443.
 
 Parameters:
   ProjectName:
@@ -13,39 +16,27 @@ Parameters:
     Type: Number
     Default: 8000
     Description: Port the backend container listens on (must match compute.yaml).
+  FrontendContainerPort:
+    Type: Number
+    Default: 3000
+    Description: Port the frontend static-server container listens on (must match compute.yaml).
   HealthCheckPath:
     Type: String
     Default: /health
-    Description: ALB target group health check path served by the backend.
+    Description: ALB backend target group health check path served by the backend.
+  FrontendHealthCheckPath:
+    Type: String
+    Default: /
+    Description: ALB frontend target group health check path served by the static server.
   CertificateArn:
     Type: String
-    Default: ''
     Description: >-
-      Optional ACM certificate ARN (us-east-1). If provided, an HTTPS:443
-      listener is added to the ALB in addition to HTTP:80.
-  CloudFrontPrefixListId:
+      ACM certificate ARN (us-east-1) covering the public app domain. Terminates
+      TLS on the ALB HTTPS:443 listener.
+  AuthStackName:
     Type: String
-    Default: pl-3b927c52
-    Description: >-
-      AWS-managed prefix list id for com.amazonaws.global.cloudfront.origin-facing.
-      In us-east-1 this is pl-3b927c52. Only CloudFront origin-facing edge ranges
-      in this prefix list are allowed to reach the ALB, so the ALB is not a second
-      open front door. Confirm the current id with:
-      aws ec2 describe-managed-prefix-lists --filters
-      Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
-  OriginVerifySecret:
-    Type: String
-    Default: ''
-    NoEcho: true
-    Description: >-
-      Shared secret sent by CloudFront in the X-Origin-Verify header. When set,
-      the ALB only forwards requests carrying this header value and returns 403
-      to anything else, so requests must transit CloudFront. Must match the
-      value configured on the CloudFront /api/* origin in the storage stack.
-
-Conditions:
-  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
-  HasOriginVerifySecret: !Not [!Equals [!Ref OriginVerifySecret, '']]
+    Default: programming-course-auth
+    Description: Name of the deployed auth stack (Cognito user pool, ALB client, domain).
 
 Mappings:
   Subnets:
@@ -206,25 +197,20 @@ Resources:
     Properties:
       GroupDescription: !Sub '${ProjectName} ALB security group'
       VpcId: !Ref VPC
-      # A managed-prefix-list ingress rule counts against the per-SG rule limit
-      # by the prefix list's max-entries weight (~55), so a single reference is
-      # already close to the default 60-rule limit and two references exceed it.
-      # When a certificate is present the CloudFront-to-ALB hop is HTTPS-only, so
-      # only the 443 ingress rule is needed; without a certificate the ALB serves
-      # the origin over HTTP:80. Either path uses exactly one prefix-list rule.
+      # The ALB is now the public front door. It accepts HTTPS from the internet
+      # and challenges unauthenticated requests with Cognito at the edge. Port 80
+      # is open only to issue the redirect to HTTPS.
       SecurityGroupIngress:
-        - !If
-          - HasCertificate
-          - IpProtocol: tcp
-            FromPort: 443
-            ToPort: 443
-            SourcePrefixListId: !Ref CloudFrontPrefixListId
-            Description: HTTPS from CloudFront origin-facing edge ranges only
-          - IpProtocol: tcp
-            FromPort: 80
-            ToPort: 80
-            SourcePrefixListId: !Ref CloudFrontPrefixListId
-            Description: HTTP from CloudFront origin-facing edge ranges only
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from the internet (Cognito challenge at the edge)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from the internet (redirect to HTTPS)
       Tags:
         - Key: Name
           Value: !Sub '${ProjectName}-alb-sg'
@@ -270,75 +256,104 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-tg'
 
-  # When an origin-verify secret is configured, the listener default action
-  # rejects any request that does not carry the shared header (i.e. did not
-  # transit CloudFront). A higher-priority rule forwards verified requests.
-  # With no secret configured the listener forwards everything (dev/default).
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-fe-tg'
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref FrontendContainerPort
+      VpcId: !Ref VPC
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref FrontendHealthCheckPath
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-fe-tg'
+
+  # Port 80 exists only to bounce plaintext callers up to HTTPS, where the
+  # Cognito challenge lives.
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Protocol: HTTP
       Port: 80
-      DefaultActions: !If
-        - HasOriginVerifySecret
-        - - Type: fixed-response
-            FixedResponseConfig:
-              StatusCode: '403'
-              ContentType: text/plain
-              MessageBody: Direct access is not allowed. Requests must transit CloudFront.
-        - - Type: forward
-            TargetGroupArn: !Ref TargetGroup
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
 
-  HttpOriginVerifyRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Condition: HasOriginVerifySecret
-    Properties:
-      ListenerArn: !Ref HttpListener
-      Priority: 1
-      Conditions:
-        - Field: http-header
-          HttpHeaderConfig:
-            HttpHeaderName: X-Origin-Verify
-            Values:
-              - !Ref OriginVerifySecret
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref TargetGroup
-
+  # The public front door. Every request first hits authenticate-cognito, which
+  # 302-redirects unauthenticated browsers to the Cognito hosted UI (which
+  # federates to Google). Authenticated requests fall through to the frontend
+  # static server by default.
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasCertificate
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Protocol: HTTPS
       Port: 443
       Certificates:
         - CertificateArn: !Ref CertificateArn
-      DefaultActions: !If
-        - HasOriginVerifySecret
-        - - Type: fixed-response
-            FixedResponseConfig:
-              StatusCode: '403'
-              ContentType: text/plain
-              MessageBody: Direct access is not allowed. Requests must transit CloudFront.
-        - - Type: forward
-            TargetGroupArn: !Ref TargetGroup
+      DefaultActions:
+        - Type: authenticate-cognito
+          Order: 1
+          AuthenticateCognitoConfig:
+            UserPoolArn:
+              Fn::ImportValue: !Sub '${AuthStackName}-UserPoolArn'
+            UserPoolClientId:
+              Fn::ImportValue: !Sub '${AuthStackName}-AlbUserPoolClientId'
+            UserPoolDomain:
+              Fn::ImportValue: !Sub '${AuthStackName}-CognitoDomainPrefix'
+            OnUnauthenticatedRequest: authenticate
+            Scope: openid email profile
+            SessionCookieName: AWSELBAuthSessionCookie
+            SessionTimeout: 3600
+        - Type: forward
+          Order: 2
+          TargetGroupArn: !Ref FrontendTargetGroup
 
-  HttpsOriginVerifyRule:
+  # /api/* also authenticates at the edge, then forwards to the FastAPI backend
+  # (which additionally validates the JWT itself, defense in depth).
+  ApiListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Condition: HasCertificate
     Properties:
       ListenerArn: !Ref HttpsListener
-      Priority: 1
+      Priority: 10
       Conditions:
-        - Field: http-header
-          HttpHeaderConfig:
-            HttpHeaderName: X-Origin-Verify
+        - Field: path-pattern
+          PathPatternConfig:
             Values:
-              - !If [HasOriginVerifySecret, !Ref OriginVerifySecret, 'disabled']
+              - /api/*
       Actions:
+        - Type: authenticate-cognito
+          Order: 1
+          AuthenticateCognitoConfig:
+            UserPoolArn:
+              Fn::ImportValue: !Sub '${AuthStackName}-UserPoolArn'
+            UserPoolClientId:
+              Fn::ImportValue: !Sub '${AuthStackName}-AlbUserPoolClientId'
+            UserPoolDomain:
+              Fn::ImportValue: !Sub '${AuthStackName}-CognitoDomainPrefix'
+            OnUnauthenticatedRequest: authenticate
+            Scope: openid email profile
+            SessionCookieName: AWSELBAuthSessionCookie
+            SessionTimeout: 3600
         - Type: forward
+          Order: 2
           TargetGroupArn: !Ref TargetGroup
 
 Outputs:
@@ -368,7 +383,7 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-AlbArn'
   AlbDnsName:
-    Description: Public DNS name of the ALB (CloudFront /api/* origin).
+    Description: Public DNS name of the ALB (Route53 alias target).
     Value: !GetAtt LoadBalancer.DNSName
     Export:
       Name: !Sub '${AWS::StackName}-AlbDnsName'
@@ -377,18 +392,28 @@ Outputs:
     Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
     Export:
       Name: !Sub '${AWS::StackName}-AlbCanonicalHostedZoneId'
-  HttpListenerArn:
-    Description: ARN of the HTTP:80 listener.
-    Value: !Ref HttpListener
+  HttpsListenerArn:
+    Description: ARN of the HTTPS:443 front-door listener.
+    Value: !Ref HttpsListener
     Export:
-      Name: !Sub '${AWS::StackName}-HttpListenerArn'
+      Name: !Sub '${AWS::StackName}-HttpsListenerArn'
   TargetGroupArn:
-    Description: ARN of the IP target group registered by the ECS service.
+    Description: ARN of the backend IP target group registered by the backend service.
     Value: !Ref TargetGroup
     Export:
       Name: !Sub '${AWS::StackName}-TargetGroupArn'
+  FrontendTargetGroupArn:
+    Description: ARN of the frontend IP target group registered by the frontend service.
+    Value: !Ref FrontendTargetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendTargetGroupArn'
   ContainerPort:
     Description: Backend container port (shared across stacks).
     Value: !Ref ContainerPort
     Export:
       Name: !Sub '${AWS::StackName}-ContainerPort'
+  FrontendContainerPort:
+    Description: Frontend container port (shared across stacks).
+    Value: !Ref FrontendContainerPort
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendContainerPort'

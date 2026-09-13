@@ -56,11 +56,10 @@ Resources:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true
             MetricName: AWSManagedRulesKnownBadInputsRuleSet
-        # This WebACL is REGIONAL and associated with the ALB, but requests
-        # arrive proxied through CloudFront, so the ALB source IP is a CloudFront
-        # edge address. Keying the rate limit on FORWARDED_IP reads the real
-        # client IP from X-Forwarded-For (CloudFront appends the viewer IP), so
-        # the limit is per end user rather than per edge node.
+        # This WebACL is REGIONAL and associated with the internet-facing ALB.
+        # The ALB records the connecting client IP in X-Forwarded-For, so keying
+        # the rate limit on FORWARDED_IP reads the real client IP and the limit
+        # is applied per end user.
         - Name: RateLimitPerForwardedIp
           Priority: 2
           Action:

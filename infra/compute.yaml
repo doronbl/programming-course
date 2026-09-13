@@ -34,14 +34,32 @@ Parameters:
     Description: >-
       Image tag to run when BackendImageUri is not supplied. The image URI is then
       built as <this-repo-uri>:<tag>.
+  FrontendImageUri:
+    Type: String
+    Default: ''
+    Description: >-
+      Full frontend image URI. Leave empty to build from FrontendImageTag against
+      the frontend ECR repo created here.
+  FrontendImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag to run for the frontend when FrontendImageUri is not supplied.
   ContainerPort:
     Type: Number
     Default: 8000
     Description: Port the backend container listens on (must match network.yaml).
+  FrontendContainerPort:
+    Type: Number
+    Default: 3000
+    Description: Port the frontend static-server container listens on (must match network.yaml).
   DesiredCount:
     Type: Number
     Default: 1
     Description: Desired number of running backend tasks.
+  FrontendDesiredCount:
+    Type: Number
+    Default: 1
+    Description: Desired number of running frontend tasks.
   TaskCpu:
     Type: String
     Default: '256'
@@ -57,6 +75,7 @@ Parameters:
 
 Conditions:
   UseProvidedImageUri: !Not [!Equals [!Ref BackendImageUri, '']]
+  UseProvidedFrontendImageUri: !Not [!Equals [!Ref FrontendImageUri, '']]
 
 Resources:
   EcrRepository:
@@ -72,10 +91,29 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-backend-ecr'
 
+  FrontendEcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: course-frontend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-frontend-ecr'
+
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/ecs/${ProjectName}-backend'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-frontend'
       RetentionInDays: !Ref LogRetentionInDays
 
   Cluster:
@@ -159,6 +197,23 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-service-sg'
 
+  FrontendServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} frontend service security group'
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref FrontendContainerPort
+          ToPort: !Ref FrontendContainerPort
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub '${NetworkStackName}-AlbSecurityGroupId'
+          Description: Frontend port from the ALB only
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-frontend-service-sg'
+
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -240,12 +295,93 @@ Resources:
           TargetGroupArn:
             Fn::ImportValue: !Sub '${NetworkStackName}-TargetGroupArn'
 
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-frontend'
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: frontend
+          Image: !If
+            - UseProvidedFrontendImageUri
+            - !Ref FrontendImageUri
+            - !Sub '${FrontendEcrRepository.RepositoryUri}:${FrontendImageTag}'
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref FrontendContainerPort
+              Protocol: tcp
+          # The SPA reads /config.json at runtime; the container renders it from
+          # these values on start so the static export stays environment-agnostic.
+          Environment:
+            - Name: PORT
+              Value: !Ref FrontendContainerPort
+            - Name: COGNITO_DOMAIN
+              Value:
+                Fn::ImportValue: !Sub '${AuthStackName}-CognitoDomainUrl'
+            - Name: COGNITO_CLIENT_ID
+              Value:
+                Fn::ImportValue: !Sub '${AuthStackName}-UserPoolClientId'
+            - Name: AWS_REGION
+              Value: us-east-1
+            - Name: API_BASE
+              Value: /api
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FrontendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    DependsOn: ClusterCapacityProviders
+    Properties:
+      ServiceName: !Sub '${ProjectName}-frontend'
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref FrontendTaskDefinition
+      DesiredCount: !Ref FrontendDesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+          Base: 0
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Split
+            - ','
+            - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnetIds'
+          SecurityGroups:
+            - !Ref FrontendServiceSecurityGroup
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: !Ref FrontendContainerPort
+          TargetGroupArn:
+            Fn::ImportValue: !Sub '${NetworkStackName}-FrontendTargetGroupArn'
+
 Outputs:
   EcrRepositoryUri:
     Description: URI of the backend ECR repository (push target for the image).
     Value: !GetAtt EcrRepository.RepositoryUri
     Export:
       Name: !Sub '${AWS::StackName}-EcrRepositoryUri'
+  FrontendEcrRepositoryUri:
+    Description: URI of the frontend ECR repository (push target for the image).
+    Value: !GetAtt FrontendEcrRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendEcrRepositoryUri'
   ClusterName:
     Description: ECS cluster name.
     Value: !Ref Cluster

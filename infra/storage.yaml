@@ -1,78 +1,17 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  programming-course storage + CDN stack (us-east-1): a private S3 content bucket
-  named course-content-<stack-derived-suffix>, a private SPA hosting bucket served
-  through CloudFront via Origin Access Control, and a CloudFront distribution that
-  serves the SPA by default and proxies /api/* to the ALB with caching disabled.
+  programming-course storage stack (us-east-1): a private S3 content bucket
+  named course-content-<stack-derived-suffix> that the FastAPI backend reads and
+  writes. The SPA is now served by an ECS static-file service behind the ALB, so
+  there is no SPA bucket and no CloudFront distribution here.
 
 Parameters:
   ProjectName:
     Type: String
     Default: programming-course
     Description: Prefix used to name/tag resources.
-  NetworkStackName:
-    Type: String
-    Default: programming-course-network
-    Description: Name of the deployed network stack to import the ALB DNS name from.
-  PriceClass:
-    Type: String
-    Default: PriceClass_100
-    AllowedValues:
-      - PriceClass_100
-      - PriceClass_200
-      - PriceClass_All
-    Description: CloudFront price class.
-  CertificateArn:
-    Type: String
-    Default: ''
-    Description: >-
-      Optional ACM certificate ARN in us-east-1 for a custom domain on
-      CloudFront. Leave empty to use the default *.cloudfront.net certificate.
-  DomainName:
-    Type: String
-    Default: ''
-    Description: >-
-      Optional custom domain (CNAME) for the CloudFront distribution. Requires
-      CertificateArn to be set.
-  BackendCertificateArn:
-    Type: String
-    Default: ''
-    Description: >-
-      Optional ACM certificate ARN for the ALB HTTPS:443 listener (matches the
-      network stack CertificateArn). When set, the CloudFront /api/* origin
-      connects to the ALB over HTTPS only, so Bearer tokens are encrypted on the
-      CloudFront-to-ALB hop. Left empty (default) the origin uses HTTP:80.
-  ApiDomainName:
-    Type: String
-    Default: ''
-    Description: >-
-      Custom domain that resolves to the ALB and matches BackendCertificateArn's
-      subject (e.g. api.example.com). Required when BackendCertificateArn is set:
-      the /api/* origin then connects to this hostname over HTTPS so the TLS name
-      matches the ALB certificate. Left empty, the origin uses the raw ALB DNS
-      name over HTTP:80.
-  OriginVerifySecret:
-    Type: String
-    Default: ''
-    NoEcho: true
-    Description: >-
-      Shared secret sent to the ALB in the X-Origin-Verify origin custom header
-      on the /api/* behavior. Must match the network stack OriginVerifySecret so
-      the ALB forwards only CloudFront-originated requests.
-
-Conditions:
-  HasCustomDomain: !And
-    - !Not [!Equals [!Ref CertificateArn, '']]
-    - !Not [!Equals [!Ref DomainName, '']]
-  ApiOriginHttps: !Not [!Equals [!Ref BackendCertificateArn, '']]
-  HasOriginVerifySecret: !Not [!Equals [!Ref OriginVerifySecret, '']]
 
 Resources:
-  # Managed CloudFront policy ids (global, well-known):
-  #   CachingDisabled cache policy      = 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-  #   CachingOptimized cache policy     = 658327ea-f89d-4fab-a63d-7e88639e58f6
-  #   AllViewer origin request policy   = 216adef6-5c7f-47e4-b989-5492eafa07d3
-
   ContentBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -98,131 +37,6 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-content'
 
-  SpaBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub
-        - 'course-spa-${Suffix}'
-        - Suffix: !Select [2, !Split ['/', !Ref AWS::StackId]]
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-spa'
-
-  CloudFrontOAC:
-    Type: AWS::CloudFront::OriginAccessControl
-    Properties:
-      OriginAccessControlConfig:
-        Name: !Sub '${ProjectName}-spa-oac'
-        Description: OAC for the SPA S3 origin.
-        OriginAccessControlOriginType: s3
-        SigningBehavior: always
-        SigningProtocol: sigv4
-
-  Distribution:
-    Type: AWS::CloudFront::Distribution
-    Properties:
-      DistributionConfig:
-        Comment: !Sub '${ProjectName} SPA + /api proxy'
-        Enabled: true
-        HttpVersion: http2and3
-        IPV6Enabled: true
-        DefaultRootObject: index.html
-        PriceClass: !Ref PriceClass
-        Aliases: !If
-          - HasCustomDomain
-          - [!Ref DomainName]
-          - !Ref AWS::NoValue
-        ViewerCertificate: !If
-          - HasCustomDomain
-          - AcmCertificateArn: !Ref CertificateArn
-            SslSupportMethod: sni-only
-            MinimumProtocolVersion: TLSv1.2_2021
-          - CloudFrontDefaultCertificate: true
-        Origins:
-          - Id: spa-s3-origin
-            DomainName: !GetAtt SpaBucket.RegionalDomainName
-            OriginAccessControlId: !Ref CloudFrontOAC
-            S3OriginConfig:
-              OriginAccessIdentity: ''
-          - Id: alb-api-origin
-            # When the origin connects over HTTPS the domain must match the ALB
-            # certificate subject, so use the custom API domain (which aliases to
-            # the ALB); otherwise use the raw ALB DNS name over HTTP.
-            DomainName: !If
-              - ApiOriginHttps
-              - !Ref ApiDomainName
-              - Fn::ImportValue: !Sub '${NetworkStackName}-AlbDnsName'
-            # When a backend certificate is configured the origin connects over
-            # HTTPS only, encrypting the Authorization Bearer token on the
-            # CloudFront-to-ALB hop. Without a cert (default) it uses HTTP:80.
-            CustomOriginConfig:
-              OriginProtocolPolicy: !If [ApiOriginHttps, https-only, http-only]
-              HTTPPort: 80
-              HTTPSPort: 443
-              OriginSSLProtocols:
-                - TLSv1.2
-            # Shared secret proving the request came from CloudFront; the ALB
-            # listener rule forwards only requests carrying this header.
-            OriginCustomHeaders: !If
-              - HasOriginVerifySecret
-              - - HeaderName: X-Origin-Verify
-                  HeaderValue: !Ref OriginVerifySecret
-              - !Ref AWS::NoValue
-        DefaultCacheBehavior:
-          TargetOriginId: spa-s3-origin
-          ViewerProtocolPolicy: redirect-to-https
-          Compress: true
-          AllowedMethods: [GET, HEAD, OPTIONS]
-          CachedMethods: [GET, HEAD]
-          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
-        CacheBehaviors:
-          - PathPattern: /api/*
-            TargetOriginId: alb-api-origin
-            ViewerProtocolPolicy: redirect-to-https
-            Compress: false
-            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-            CachedMethods: [GET, HEAD]
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
-        CustomErrorResponses:
-          - ErrorCode: 403
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 10
-          - ErrorCode: 404
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 10
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-cdn'
-
-  SpaBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref SpaBucket
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowCloudFrontServicePrincipalReadOnly
-            Effect: Allow
-            Principal:
-              Service: cloudfront.amazonaws.com
-            Action: s3:GetObject
-            Resource: !Sub '${SpaBucket.Arn}/*'
-            Condition:
-              StringEquals:
-                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution.Id}'
-
 Outputs:
   ContentBucketName:
     Description: Name of the private S3 content bucket (backend CONTENT_BUCKET).
@@ -234,26 +48,3 @@ Outputs:
     Value: !GetAtt ContentBucket.Arn
     Export:
       Name: !Sub '${AWS::StackName}-ContentBucketArn'
-  SpaBucketName:
-    Description: Name of the private SPA hosting bucket (next export target).
-    Value: !Ref SpaBucket
-    Export:
-      Name: !Sub '${AWS::StackName}-SpaBucketName'
-  DistributionId:
-    Description: CloudFront distribution id (for cache invalidation on deploy).
-    Value: !Ref Distribution
-    Export:
-      Name: !Sub '${AWS::StackName}-DistributionId'
-  DistributionDomainName:
-    Description: CloudFront domain name serving the SPA and /api proxy.
-    Value: !GetAtt Distribution.DomainName
-    Export:
-      Name: !Sub '${AWS::StackName}-DistributionDomainName'
-  AppUrl:
-    Description: Public application URL (custom domain if set, else CloudFront).
-    Value: !If
-      - HasCustomDomain
-      - !Sub 'https://${DomainName}'
-      - !Sub 'https://${Distribution.DomainName}'
-    Export:
-      Name: !Sub '${AWS::StackName}-AppUrl'
