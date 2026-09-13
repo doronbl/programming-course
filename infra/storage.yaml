@@ -42,6 +42,15 @@ Parameters:
       network stack CertificateArn). When set, the CloudFront /api/* origin
       connects to the ALB over HTTPS only, so Bearer tokens are encrypted on the
       CloudFront-to-ALB hop. Left empty (default) the origin uses HTTP:80.
+  ApiDomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      Custom domain that resolves to the ALB and matches BackendCertificateArn's
+      subject (e.g. api.example.com). Required when BackendCertificateArn is set:
+      the /api/* origin then connects to this hostname over HTTPS so the TLS name
+      matches the ALB certificate. Left empty, the origin uses the raw ALB DNS
+      name over HTTP:80.
   OriginVerifySecret:
     Type: String
     Default: ''
@@ -62,7 +71,7 @@ Resources:
   # Managed CloudFront policy ids (global, well-known):
   #   CachingDisabled cache policy      = 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
   #   CachingOptimized cache policy     = 658327ea-f89d-4fab-a63d-7e88639e58f6
-  #   AllViewer origin request policy   = 216adef6-5c7f-47e4-b989-5492eeaf6572
+  #   AllViewer origin request policy   = 216adef6-5c7f-47e4-b989-5492eafa07d3
 
   ContentBucket:
     Type: AWS::S3::Bucket
@@ -145,8 +154,13 @@ Resources:
             S3OriginConfig:
               OriginAccessIdentity: ''
           - Id: alb-api-origin
-            DomainName:
-              Fn::ImportValue: !Sub '${NetworkStackName}-AlbDnsName'
+            # When the origin connects over HTTPS the domain must match the ALB
+            # certificate subject, so use the custom API domain (which aliases to
+            # the ALB); otherwise use the raw ALB DNS name over HTTP.
+            DomainName: !If
+              - ApiOriginHttps
+              - !Ref ApiDomainName
+              - Fn::ImportValue: !Sub '${NetworkStackName}-AlbDnsName'
             # When a backend certificate is configured the origin connects over
             # HTTPS only, encrypting the Authorization Bearer token on the
             # CloudFront-to-ALB hop. Without a cert (default) it uses HTTP:80.
@@ -178,7 +192,7 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
             CachedMethods: [GET, HEAD]
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eeaf6572
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200

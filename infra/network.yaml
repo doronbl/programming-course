@@ -206,12 +206,13 @@ Resources:
     Properties:
       GroupDescription: !Sub '${ProjectName} ALB security group'
       VpcId: !Ref VPC
+      # A managed-prefix-list ingress rule counts against the per-SG rule limit
+      # by the prefix list's max-entries weight (~55), so a single reference is
+      # already close to the default 60-rule limit and two references exceed it.
+      # When a certificate is present the CloudFront-to-ALB hop is HTTPS-only, so
+      # only the 443 ingress rule is needed; without a certificate the ALB serves
+      # the origin over HTTP:80. Either path uses exactly one prefix-list rule.
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          SourcePrefixListId: !Ref CloudFrontPrefixListId
-          Description: HTTP from CloudFront origin-facing edge ranges only
         - !If
           - HasCertificate
           - IpProtocol: tcp
@@ -219,7 +220,11 @@ Resources:
             ToPort: 443
             SourcePrefixListId: !Ref CloudFrontPrefixListId
             Description: HTTPS from CloudFront origin-facing edge ranges only
-          - !Ref AWS::NoValue
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            SourcePrefixListId: !Ref CloudFrontPrefixListId
+            Description: HTTP from CloudFront origin-facing edge ranges only
       Tags:
         - Key: Name
           Value: !Sub '${ProjectName}-alb-sg'

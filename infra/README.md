@@ -103,7 +103,7 @@ stack name; if you keep the default names there is nothing to change.
 ## Managed CloudFront policy ids used
 
 - CachingDisabled cache policy: `4135ea2d-6df8-44a3-9df3-4b5a84be39ad` (used on `/api/*`).
-- AllViewer origin request policy: `216adef6-5c7f-47e4-b989-5492eeaf6572` (forwards
+- AllViewer origin request policy: `216adef6-5c7f-47e4-b989-5492eafa07d3` (forwards
   all viewer headers incl. `Authorization` + query strings on `/api/*`).
 - CachingOptimized cache policy: `658327ea-f89d-4fab-a63d-7e88639e58f6` (default SPA behavior).
 
